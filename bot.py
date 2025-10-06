@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 from typing import List, Tuple, Dict
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    Updater, CommandHandler, MessageHandler, Filters, 
+    Application, CommandHandler, MessageHandler, filters, 
     CallbackContext, CallbackQueryHandler
 )
 from flask import Flask, jsonify
@@ -52,7 +52,7 @@ app = Flask(__name__)
 
 # Global variables
 bot_running = False
-updater = None
+application = None
 
 @app.route('/')
 def health_check():
@@ -287,13 +287,13 @@ class NetworkScanner:
         return results, successful_hosts, len(hosts), duration
 
 # Telegram Bot Functions
-def start(update: Update, context: CallbackContext) -> None:
+async def start(update: Update, context: CallbackContext) -> None:
     user = update.effective_user
     user_id = user.id
     
     can_access, error_msg = UserManager.can_user_access(user_id)
     if not can_access:
-        update.message.reply_text(error_msg)
+        await update.message.reply_text(error_msg)
         return
     
     if user_id not in user_sessions:
@@ -321,9 +321,9 @@ def start(update: Update, context: CallbackContext) -> None:
         "Join our channels for more daily scans!"
     )
     
-    update.message.reply_text(welcome_text, reply_markup=reply_markup)
+    await update.message.reply_text(welcome_text, reply_markup=reply_markup)
 
-def help_command(update: Update, context: CallbackContext) -> None:
+async def help_command(update: Update, context: CallbackContext) -> None:
     user_id = update.effective_user.id
     can_request, status_msg, remaining = UserManager.can_make_request(user_id)
     
@@ -339,24 +339,24 @@ def help_command(update: Update, context: CallbackContext) -> None:
         "Use /scan to start scanning!"
     )
     
-    update.message.reply_text(help_text)
+    await update.message.reply_text(help_text)
 
-def button_handler(update: Update, context: CallbackContext) -> None:
+async def button_handler(update: Update, context: CallbackContext) -> None:
     query = update.callback_query
-    query.answer()
+    await query.answer()
     
     if query.data == "help":
-        help_command(update, context)
+        await help_command(update, context)
 
-def error_handler(update: Update, context: CallbackContext) -> None:
+async def error_handler(update: Update, context: CallbackContext) -> None:
     logging.error(f"Exception while handling an update: {context.error}")
 
 def run_bot():
-    global bot_running, updater
+    global bot_running, application
     
     try:
-        updater = Updater(BOT_TOKEN, use_context=True)
-        dp = updater.dispatcher
+        application = Application.builder().token(BOT_TOKEN).build()
+        dp = application
 
         dp.add_handler(CommandHandler("start", start))
         dp.add_handler(CommandHandler("help", help_command))
@@ -366,19 +366,14 @@ def run_bot():
         print("🤖 Bot is starting...")
         bot_running = True
         
-        updater.start_polling(drop_pending_updates=True)
+        application.run_polling(drop_pending_updates=True)
         print("✅ Bot is now running!")
-        
-        # Keep the thread alive
-        updater.idle()
         
     except Exception as e:
         logging.error(f"Bot error: {e}")
         bot_running = False
     finally:
         bot_running = False
-        if updater:
-            updater.stop()
 
 def main():
     print("🚀 Starting Telegram Bot...")
