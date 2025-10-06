@@ -15,7 +15,6 @@ from telegram.ext import (
 )
 from flask import Flask, jsonify
 import threading
-import requests
 
 # Configure logging
 logging.basicConfig(
