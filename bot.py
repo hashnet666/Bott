@@ -1,14 +1,13 @@
-#Hydra Made
+#!/usr/bin/env python3
 import logging
 import socket
 import ssl
 import concurrent.futures
 import os
-import sys
 import time
 import datetime
-import json
 import sqlite3
+import asyncio
 from urllib.parse import urlparse
 from typing import List, Tuple, Dict, Optional
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -23,11 +22,11 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
+logger = logging.getLogger(__name__)
 
 # Bot Configuration
 BOT_TOKEN = os.environ.get('BOT_TOKEN')
 OWNER_CHAT_ID = os.environ.get('OWNER_CHAT_ID')
-DATABASE_URL = os.environ.get('DATABASE_URL', 'sqlite:///bot_data.db')
 
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN environment variable is required")
@@ -106,10 +105,10 @@ class DatabaseManager:
             
             conn.commit()
             conn.close()
-            logging.info("Database initialized successfully")
+            logger.info("Database initialized successfully")
             
         except sqlite3.Error as e:
-            logging.error(f"Database initialization error: {e}")
+            logger.error(f"Database initialization error: {e}")
             raise
     
     def get_connection(self):
@@ -119,7 +118,7 @@ class DatabaseManager:
             conn.row_factory = sqlite3.Row
             return conn
         except sqlite3.Error as e:
-            logging.error(f"Database connection error: {e}")
+            logger.error(f"Database connection error: {e}")
             raise
     
     def execute_with_retry(self, query: str, params: tuple = (), max_retries: int = 3):
@@ -135,13 +134,13 @@ class DatabaseManager:
                 return result
             except sqlite3.OperationalError as e:
                 if "locked" in str(e) and attempt < max_retries - 1:
-                    logging.warning(f"Database locked, retrying... (attempt {attempt + 1})")
+                    logger.warning(f"Database locked, retrying... (attempt {attempt + 1})")
                     time.sleep(0.1 * (attempt + 1))
                 else:
-                    logging.error(f"Database error after {attempt + 1} attempts: {e}")
+                    logger.error(f"Database error after {attempt + 1} attempts: {e}")
                     raise
             except sqlite3.Error as e:
-                logging.error(f"Database error: {e}")
+                logger.error(f"Database error: {e}")
                 raise
     
     def fetch_one(self, query: str, params: tuple = ()):
@@ -154,7 +153,7 @@ class DatabaseManager:
             conn.close()
             return dict(result) if result else None
         except sqlite3.Error as e:
-            logging.error(f"Database fetch error: {e}")
+            logger.error(f"Database fetch error: {e}")
             return None
     
     def fetch_all(self, query: str, params: tuple = ()):
@@ -167,7 +166,7 @@ class DatabaseManager:
             conn.close()
             return results
         except sqlite3.Error as e:
-            logging.error(f"Database fetch all error: {e}")
+            logger.error(f"Database fetch all error: {e}")
             return []
 
 # Initialize database
@@ -255,7 +254,7 @@ class UserManager:
             return True, ""
             
         except Exception as e:
-            logging.error(f"Error in can_user_access: {e}")
+            logger.error(f"Error in can_user_access: {e}")
             # Allow access on database error to avoid blocking users
             return True, ""
     
@@ -307,7 +306,7 @@ class UserManager:
             return True, status_msg, remaining
             
         except Exception as e:
-            logging.error(f"Error in can_make_request: {e}")
+            logger.error(f"Error in can_make_request: {e}")
             # Allow request on database error
             return True, "✅ Database temporarily unavailable - request allowed", 1
     
@@ -320,7 +319,7 @@ class UserManager:
                 (user_id,)
             )
         except Exception as e:
-            logging.error(f"Error incrementing request count: {e}")
+            logger.error(f"Error incrementing request count: {e}")
     
     @staticmethod
     def set_joined_channels(user_id: int):
@@ -331,7 +330,7 @@ class UserManager:
                 (user_id,)
             )
         except Exception as e:
-            logging.error(f"Error setting joined channels: {e}")
+            logger.error(f"Error setting joined channels: {e}")
     
     @staticmethod
     def get_user_session(user_id: int) -> Optional[Dict]:
@@ -342,7 +341,7 @@ class UserManager:
                 (user_id,)
             )
         except Exception as e:
-            logging.error(f"Error getting user session: {e}")
+            logger.error(f"Error getting user session: {e}")
             return None
     
     @staticmethod
@@ -356,7 +355,7 @@ class UserManager:
                 (user_id, scan_type)
             )
         except Exception as e:
-            logging.error(f"Error setting user session: {e}")
+            logger.error(f"Error setting user session: {e}")
     
     @staticmethod
     def log_scan(user_id: int, protocol: str, total_hosts: int, successful_hosts: int, duration: float):
@@ -369,15 +368,15 @@ class UserManager:
                 (user_id, protocol, total_hosts, successful_hosts, duration)
             )
         except Exception as e:
-            logging.error(f"Error logging scan: {e}")
+            logger.error(f"Error logging scan: {e}")
 
 class NetworkScanner:
     def __init__(self, protocol: str, hosts_file: str):
         self.hosts_file = hosts_file
-        self.max_workers = 30
-        self.connect_timeout = 10
-        self.rate_limit_delay = 0.1
-        self.success_log_file = 'Host_File.txt'
+        self.max_workers = 20
+        self.connect_timeout = 5
+        self.rate_limit_delay = 0.05
+        self.success_log_file = f'Host_File_{int(time.time())}.txt'
 
         self.protocol = protocol.lower()
         self.ssl_context = None
@@ -398,15 +397,15 @@ class NetworkScanner:
         }
 
         if self.protocol == 'tls':
-            self.success_response = 'HTTP/1.1 101 Switching Protocols'
+            self.success_response = 'HTTP/1.1 101'
             self.ssl_context = self._create_ssl_context()
             self.server_hostname = 'nl1.wstunnel.xyz'
         
         elif self.protocol == 'http':
-            self.success_response = 'HTTP/1.1 200 OK'
+            self.success_response = 'HTTP/1.1 200'
 
         elif self.protocol == 'vless':
-            self.success_response = 'HTTP/1.1 101 Switching Protocols'
+            self.success_response = 'HTTP/1.1 101'
             self.ssl_context = self._create_ssl_context()
             self.server_hostname = 'sa3.vpnjantit.com'
             self.vless_path = '/vpnjantit'
@@ -458,11 +457,11 @@ class NetworkScanner:
 
     def _log_successful_host(self, host: str, server_type: str = 'unknown'):
         try:
-            with open(self.success_log_file, 'a') as log_file:
+            with open(self.success_log_file, 'a', encoding='utf-8') as log_file:
                 timestamp = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 log_file.write(f"{timestamp} - {self.protocol.upper()}://{host}:{self.port} (Server: {server_type.upper()})\n")
-        except IOError:
-            pass
+        except IOError as e:
+            logger.error(f"Error writing to log file: {e}")
 
     def check_host(self, host: str) -> Tuple[str, bool, str]:
         time.sleep(self.rate_limit_delay)
@@ -482,27 +481,27 @@ class NetworkScanner:
 
                 server_type = self._detect_server_type(response)
 
-                if self.protocol in ['tls', 'vless'] and response.startswith('HTTP/1.1 101 Switching Protocols'):
+                if self.protocol in ['tls', 'vless'] and 'HTTP/1.1 101' in response:
                     self._log_successful_host(host, server_type)
                     return (host, True, server_type)
                 
-                elif response.startswith(self.success_response):
+                elif 'HTTP/1.1 200' in response:
                     self._log_successful_host(host, server_type)
                     return (host, True, server_type)
                     
                 else:
                     return (host, False, 'unknown')
                         
-        except Exception:
+        except Exception as e:
+            logger.debug(f"Host check failed for {host}: {e}")
             return (host, False, 'unknown')
 
     def load_hosts(self) -> List[str]:
-        filename = self.hosts_file
-        if not os.path.exists(filename):
-            raise FileNotFoundError(f"Hosts file '{filename}' not found.")
+        if not os.path.exists(self.hosts_file):
+            raise FileNotFoundError(f"Hosts file '{self.hosts_file}' not found.")
             
         hosts = []
-        with open(filename, 'r') as f:
+        with open(self.hosts_file, 'r', encoding='utf-8') as f:
             for line in f:
                 host = line.strip()
                 if host and not host.startswith('#'):
@@ -512,7 +511,8 @@ class NetworkScanner:
                         parsed = urlparse(f"//{host}")
                         if parsed.hostname:
                             hosts.append(parsed.hostname)
-                    except Exception:
+                    except Exception as e:
+                        logger.debug(f"Invalid host format: {host} - {e}")
                         continue
         return hosts
 
@@ -523,6 +523,7 @@ class NetworkScanner:
         results = {}
         server_stats = {}
         
+        # Clear the success log file at start of scan
         open(self.success_log_file, 'w').close()
         
         start_time = time.time()
@@ -539,7 +540,8 @@ class NetworkScanner:
                     if success and server_type != 'unknown':
                         server_stats[server_type] = server_stats.get(server_type, 0) + 1
                         
-                except Exception:
+                except Exception as e:
+                    logger.error(f"Error processing host {host}: {e}")
                     results[host] = False
         
         end_time = time.time()
@@ -672,11 +674,11 @@ async def handle_file_upload(update: Update, context: CallbackContext) -> None:
         document = update.message.document
         
         if not document.file_name or not document.file_name.endswith('.txt'):
-            await update.message.reply_text("❌ Please upload a valid .txt file named 'hosts.txt'")
+            await update.message.reply_text("❌ Please upload a valid .txt file")
             return
         
         file = await context.bot.get_file(document.file_id)
-        file_path = f"user_{user_id}_hosts.txt"
+        file_path = f"user_{user_id}_{int(time.time())}.txt"
         await file.download_to_drive(file_path)
         
         user_session = UserManager.get_user_session(user_id)
@@ -697,7 +699,7 @@ async def handle_file_upload(update: Update, context: CallbackContext) -> None:
         await start_scan_process(update, context, file_path, scan_type, user_id)
         
     except Exception as e:
-        logging.error(f"Error handling file upload: {e}")
+        logger.error(f"Error handling file upload: {e}")
         await update.message.reply_text("❌ Error processing your file.")
 
 async def start_scan_process(update: Update, context: CallbackContext, file_path: str, scan_type: str, user_id: int):
@@ -717,7 +719,11 @@ async def start_scan_process(update: Update, context: CallbackContext, file_path
         
         await status_msg.edit_text(f"🔍 **Scanning {len(hosts)} hosts**\nProtocol: {protocol_names[scan_type]}\n🔄 Running...")
         
-        results, successful, total, duration, server_stats = scanner.run_scan(hosts)
+        # Run scan in thread to avoid blocking
+        loop = asyncio.get_event_loop()
+        results, successful, total, duration, server_stats = await loop.run_in_executor(
+            None, scanner.run_scan, hosts
+        )
         
         # Log scan to database
         UserManager.log_scan(user_id, scan_type, total, successful, duration)
@@ -749,23 +755,31 @@ async def start_scan_process(update: Update, context: CallbackContext, file_path
         
         if successful > 0:
             result_text += f"🎯 **Found {successful} working hosts!**\n"
-            with open(scanner.success_log_file, 'rb') as result_file:
-                await update.message.reply_document(
-                    document=result_file,
-                    filename=f"results_{user_id}.txt",
-                    caption=result_text,
-                    reply_markup=reply_markup
-                )
+            try:
+                with open(scanner.success_log_file, 'rb') as result_file:
+                    await update.message.reply_document(
+                        document=result_file,
+                        filename=f"results_{user_id}.txt",
+                        caption=result_text,
+                        reply_markup=reply_markup
+                    )
+            except Exception as e:
+                logger.error(f"Error sending document: {e}")
+                result_text += "\n❌ Could not send results file."
+                await update.message.reply_text(result_text, reply_markup=reply_markup)
         else:
             await update.message.reply_text(result_text, reply_markup=reply_markup)
         
-        if os.path.exists(file_path):
-            os.remove(file_path)
-        if os.path.exists(scanner.success_log_file):
-            os.remove(scanner.success_log_file)
+        # Cleanup files
+        for file_to_remove in [file_path, scanner.success_log_file]:
+            try:
+                if os.path.exists(file_to_remove):
+                    os.remove(file_to_remove)
+            except Exception as e:
+                logger.error(f"Error removing file {file_to_remove}: {e}")
             
     except Exception as e:
-        logging.error(f"Scan error: {e}")
+        logger.error(f"Scan error: {e}")
         keyboard = [[InlineKeyboardButton("🔙 Back to Main", callback_data="main_menu")]]
         reply_markup = InlineKeyboardMarkup(keyboard)
         await update.message.reply_text(f"❌ **Scan Failed**\nError: {str(e)}", reply_markup=reply_markup)
@@ -845,36 +859,38 @@ async def start_from_query(update: Update, context: CallbackContext) -> None:
     await query.edit_message_text(welcome_text, reply_markup=reply_markup)
 
 async def error_handler(update: Update, context: CallbackContext) -> None:
-    logging.error(f"Bot error: {context.error}")
+    logger.error(f"Bot error: {context.error}")
+
+def run_bot():
+    """Run the Telegram bot"""
+    try:
+        # Use a simpler application builder approach
+        application = Application.builder().token(BOT_TOKEN).build()
+        
+        # Add handlers
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CommandHandler("help", help_command))
+        application.add_handler(MessageHandler(filters.Document.ALL, handle_file_upload))
+        application.add_handler(CallbackQueryHandler(button_handler))
+        application.add_error_handler(error_handler)
+        
+        logger.info("🤖 Bot starting...")
+        application.run_polling(drop_pending_updates=True)
+    except Exception as e:
+        logger.error(f"Bot failed to start: {e}")
+        raise
 
 def main():
-    """Main function - runs both bot and web server"""
+    """Main function - choose between bot and web based on environment"""
     print("🚀 Starting Network Scanner Bot...")
     
-    # Create and configure bot
-    application = Application.builder().token(BOT_TOKEN).build()
-    
-    # Add handlers
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(MessageHandler(filters.Document.ALL, handle_file_upload))
-    application.add_handler(CallbackQueryHandler(button_handler))
-    application.add_error_handler(error_handler)
-    
-    print("🤖 Bot configured successfully!")
-    
-    # Start bot polling in a separate thread
-    def run_bot():
-        try:
-            application.run_polling(drop_pending_updates=True)
-        except Exception as e:
-            print(f"Bot error: {e}")
-    
+    # For Render.com, we need to run both in the same process
+    # Start bot in a separate thread
     import threading
     bot_thread = threading.Thread(target=run_bot, daemon=True)
     bot_thread.start()
     
-    # Start Flask app
+    # Start Flask app in main thread
     port = int(os.environ.get('PORT', 10000))
     print(f"🌐 Web server starting on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
