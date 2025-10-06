@@ -10,12 +10,6 @@ import sqlite3
 import asyncio
 from urllib.parse import urlparse
 from typing import List, Tuple, Dict, Optional
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    Application, CommandHandler, MessageHandler, filters, 
-    CallbackContext, CallbackQueryHandler
-)
-from flask import Flask, jsonify
 
 # Configure logging
 logging.basicConfig(
@@ -43,6 +37,32 @@ MAX_USERS_PER_HOUR = 100
 MAX_REQUESTS_FREE = 3
 MAX_REQUESTS_PREMIUM = 5
 REQUEST_RESET_HOURS = 24
+
+# Try to import telegram with fallback
+try:
+    from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+    from telegram.ext import (
+        Application, CommandHandler, MessageHandler, filters, 
+        CallbackContext, CallbackQueryHandler
+    )
+    TELEGRAM_AVAILABLE = True
+except ImportError as e:
+    logger.error(f"Telegram library import failed: {e}")
+    TELEGRAM_AVAILABLE = False
+    # Create mock classes for basic functionality
+    class Update:
+        pass
+    class CallbackContext:
+        pass
+    class InlineKeyboardButton:
+        def __init__(self, text, callback_data=None):
+            self.text = text
+            self.callback_data = callback_data
+    class InlineKeyboardMarkup:
+        def __init__(self, keyboard):
+            self.keyboard = keyboard
+
+from flask import Flask, jsonify
 
 # Flask app
 app = Flask(__name__)
@@ -182,10 +202,13 @@ def health_check():
         if not test_result:
             db_status = "unhealthy"
         
+        telegram_status = "available" if TELEGRAM_AVAILABLE else "unavailable"
+        
         return jsonify({
             "status": "healthy", 
             "service": "Telegram Bot",
             "database": db_status,
+            "telegram_library": telegram_status,
             "timestamp": datetime.datetime.now().isoformat()
         })
     except Exception as e:
@@ -550,345 +573,348 @@ class NetworkScanner:
         
         return results, successful_hosts, len(hosts), duration, server_stats
 
-# Telegram Bot Functions
-async def start(update: Update, context: CallbackContext) -> None:
-    user = update.effective_user
-    user_id = user.id
-    
-    can_access, error_msg = UserManager.can_user_access(user_id)
-    if not can_access:
-        await update.message.reply_text(error_msg)
-        return
-    
-    UserManager.set_user_session(user_id)
-    
-    can_request, status_msg, remaining = UserManager.can_make_request(user_id)
-    
-    keyboard = [
-        [InlineKeyboardButton("🔍 Network Scanner", callback_data="scanner")],
-        [InlineKeyboardButton("📢 Our Channels", callback_data="channels")],
-        [InlineKeyboardButton("🆘 Help", callback_data="help")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    welcome_text = (
-        f"👋 Welcome {user.first_name}!\n\n"
-        f"🤖 **Advanced Network Scanner Bot**\n\n"
-        f"📊 **Your Status:** {status_msg}\n\n"
-        "🔹 **Multi-Protocol Scanning**\n"
-        "🔹 **Server Type Detection**\n"
-        "🔹 **Real-time Results**\n\n"
-        f"**Free:** {MAX_REQUESTS_FREE} scans/day\n"
-        f"**Premium:** {MAX_REQUESTS_PREMIUM} scans/day\n\n"
-        "Upload hosts.txt file to start scanning!"
-    )
-    
-    await update.message.reply_text(welcome_text, reply_markup=reply_markup)
-
-async def help_command(update: Update, context: CallbackContext) -> None:
-    user_id = update.effective_user.id
-    can_request, status_msg, remaining = UserManager.can_make_request(user_id)
-    
-    help_text = (
-        f"🤖 **Network Scanner Bot**\n\n"
-        f"📊 **Your Status:** {status_msg}\n\n"
-        "**Features:**\n"
-        "• TLS/HTTP/VLESS Protocol Scanning\n"
-        "• Server Type Detection\n"
-        "• Multi-threaded Performance\n\n"
-        "**Usage:**\n"
-        "1. Upload hosts.txt file\n"
-        "2. Choose protocol\n"
-        "3. Get results with server stats\n\n"
-        f"**Limits:** {MAX_REQUESTS_FREE} free, {MAX_REQUESTS_PREMIUM} premium scans/day"
-    )
-    
-    keyboard = [[InlineKeyboardButton("🔙 Back to Main", callback_data="main_menu")]]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    if update.callback_query:
-        await update.callback_query.edit_message_text(help_text, reply_markup=reply_markup)
-    else:
-        await update.message.reply_text(help_text, reply_markup=reply_markup)
-
-async def show_channels(update: Update, context: CallbackContext) -> None:
-    channels_text = "📢 **Join Our Channels**\n\n"
-    for channel in CHANNELS:
-        channels_text += f"{channel['name']}\n{channel['url']}\n\n"
-    
-    channels_text += "Join all channels to get premium benefits!"
-    
-    keyboard = [
-        [InlineKeyboardButton("✅ I've Joined All", callback_data="joined_channels")],
-        [InlineKeyboardButton("🔙 Back to Main", callback_data="main_menu")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    if update.callback_query:
-        await update.callback_query.edit_message_text(channels_text, reply_markup=reply_markup)
-    else:
-        await update.message.reply_text(channels_text, reply_markup=reply_markup)
-
-async def show_scanner_menu(update: Update, context: CallbackContext) -> None:
-    user_id = update.effective_user.id
-    
-    can_request, status_msg, remaining = UserManager.can_make_request(user_id)
-    
-    menu_text = (
-        f"🔍 **Network Scanner**\n\n"
-        f"📊 **Your Status:** {status_msg}\n\n"
-        "**Available Protocols:**\n"
-        "• 🛡️ TLS Scan (WebSocket over TLS)\n"
-        "• 🌐 HTTP Scan (Standard HTTP)\n"
-        "• ⚡ VLESS Scan (VLESS over TLS)\n\n"
-        "**Instructions:**\n"
-        "1. Choose a protocol below\n"
-        "2. Upload your hosts.txt file\n"
-        "3. Wait for scan results\n\n"
-        f"Remaining scans today: **{remaining}**"
-    )
-    
-    keyboard = [
-        [InlineKeyboardButton("🛡️ TLS Scan", callback_data="scan_tls"),
-         InlineKeyboardButton("🌐 HTTP Scan", callback_data="scan_http")],
-        [InlineKeyboardButton("⚡ VLESS Scan", callback_data="scan_vless")],
-        [InlineKeyboardButton("🔙 Back to Main", callback_data="main_menu")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    if update.callback_query:
-        await update.callback_query.edit_message_text(menu_text, reply_markup=reply_markup)
-    else:
-        await update.message.reply_text(menu_text, reply_markup=reply_markup)
-
-async def handle_file_upload(update: Update, context: CallbackContext) -> None:
-    try:
+# Telegram Bot Functions (only if telegram is available)
+if TELEGRAM_AVAILABLE:
+    async def start(update: Update, context: CallbackContext) -> None:
         user = update.effective_user
         user_id = user.id
         
-        can_request, status_msg, remaining = UserManager.can_make_request(user_id)
-        if not can_request:
-            await update.message.reply_text(status_msg)
+        can_access, error_msg = UserManager.can_user_access(user_id)
+        if not can_access:
+            await update.message.reply_text(error_msg)
             return
         
-        document = update.message.document
-        
-        if not document.file_name or not document.file_name.endswith('.txt'):
-            await update.message.reply_text("❌ Please upload a valid .txt file")
-            return
-        
-        file = await context.bot.get_file(document.file_id)
-        file_path = f"user_{user_id}_{int(time.time())}.txt"
-        await file.download_to_drive(file_path)
-        
-        user_session = UserManager.get_user_session(user_id)
-        if not user_session or user_session.get('scan_type') is None:
-            keyboard = [
-                [InlineKeyboardButton("🛡️ TLS Scan", callback_data="scan_tls"),
-                 InlineKeyboardButton("🌐 HTTP Scan", callback_data="scan_http")],
-                [InlineKeyboardButton("⚡ VLESS Scan", callback_data="scan_vless")],
-                [InlineKeyboardButton("🔙 Back to Main", callback_data="main_menu")]
-            ]
-            reply_markup = InlineKeyboardMarkup(keyboard)
-            
-            await update.message.reply_text("📥 **File received!**\nChoose scan protocol:", reply_markup=reply_markup)
-            return
-        
-        UserManager.increment_request_count(user_id)
-        scan_type = user_session['scan_type']
-        await start_scan_process(update, context, file_path, scan_type, user_id)
-        
-    except Exception as e:
-        logger.error(f"Error handling file upload: {e}")
-        await update.message.reply_text("❌ Error processing your file.")
-
-async def start_scan_process(update: Update, context: CallbackContext, file_path: str, scan_type: str, user_id: int):
-    try:
-        protocol_names = {'tls': 'TLS', 'http': 'HTTP', 'vless': 'VLESS'}
-        
-        status_msg = await update.message.reply_text(f"🔍 **Starting {protocol_names[scan_type]} Scan**\nLoading hosts... ⏳")
-        
-        scanner = NetworkScanner(scan_type, file_path)
-        hosts = scanner.load_hosts()
-        
-        if not hosts:
-            await status_msg.edit_text("❌ **No valid hosts found!**")
-            if os.path.exists(file_path):
-                os.remove(file_path)
-            return
-        
-        await status_msg.edit_text(f"🔍 **Scanning {len(hosts)} hosts**\nProtocol: {protocol_names[scan_type]}\n🔄 Running...")
-        
-        # Run scan in thread to avoid blocking
-        loop = asyncio.get_event_loop()
-        results, successful, total, duration, server_stats = await loop.run_in_executor(
-            None, scanner.run_scan, hosts
-        )
-        
-        # Log scan to database
-        UserManager.log_scan(user_id, scan_type, total, successful, duration)
+        UserManager.set_user_session(user_id)
         
         can_request, status_msg, remaining = UserManager.can_make_request(user_id)
-        
-        result_text = (
-            f"✅ **Scan Complete!**\n\n"
-            f"**Protocol:** {protocol_names[scan_type]}\n"
-            f"**Total:** {total} hosts\n"
-            f"**✅ Working:** {successful}\n"
-            f"**❌ Failed:** {total - successful}\n"
-            f"**⏱️ Time:** {duration:.2f}s\n\n"
-        )
-        
-        if server_stats:
-            result_text += "**🏗️ Server Types:**\n"
-            for server_type, count in sorted(server_stats.items(), key=lambda x: x[1], reverse=True):
-                result_text += f"• {count} {server_type.upper()}\n"
-            result_text += "\n"
-        
-        result_text += f"📊 **Remaining scans:** {remaining}\n\n"
         
         keyboard = [
-            [InlineKeyboardButton("🔄 Scan Again", callback_data="scanner")],
+            [InlineKeyboardButton("🔍 Network Scanner", callback_data="scanner")],
+            [InlineKeyboardButton("📢 Our Channels", callback_data="channels")],
+            [InlineKeyboardButton("🆘 Help", callback_data="help")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        welcome_text = (
+            f"👋 Welcome {user.first_name}!\n\n"
+            f"🤖 **Advanced Network Scanner Bot**\n\n"
+            f"📊 **Your Status:** {status_msg}\n\n"
+            "🔹 **Multi-Protocol Scanning**\n"
+            "🔹 **Server Type Detection**\n"
+            "🔹 **Real-time Results**\n\n"
+            f"**Free:** {MAX_REQUESTS_FREE} scans/day\n"
+            f"**Premium:** {MAX_REQUESTS_PREMIUM} scans/day\n\n"
+            "Upload hosts.txt file to start scanning!"
+        )
+        
+        await update.message.reply_text(welcome_text, reply_markup=reply_markup)
+
+    async def help_command(update: Update, context: CallbackContext) -> None:
+        user_id = update.effective_user.id
+        can_request, status_msg, remaining = UserManager.can_make_request(user_id)
+        
+        help_text = (
+            f"🤖 **Network Scanner Bot**\n\n"
+            f"📊 **Your Status:** {status_msg}\n\n"
+            "**Features:**\n"
+            "• TLS/HTTP/VLESS Protocol Scanning\n"
+            "• Server Type Detection\n"
+            "• Multi-threaded Performance\n\n"
+            "**Usage:**\n"
+            "1. Upload hosts.txt file\n"
+            "2. Choose protocol\n"
+            "3. Get results with server stats\n\n"
+            f"**Limits:** {MAX_REQUESTS_FREE} free, {MAX_REQUESTS_PREMIUM} premium scans/day"
+        )
+        
+        keyboard = [[InlineKeyboardButton("🔙 Back to Main", callback_data="main_menu")]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        if update.callback_query:
+            await update.callback_query.edit_message_text(help_text, reply_markup=reply_markup)
+        else:
+            await update.message.reply_text(help_text, reply_markup=reply_markup)
+
+    async def show_channels(update: Update, context: CallbackContext) -> None:
+        channels_text = "📢 **Join Our Channels**\n\n"
+        for channel in CHANNELS:
+            channels_text += f"{channel['name']}\n{channel['url']}\n\n"
+        
+        channels_text += "Join all channels to get premium benefits!"
+        
+        keyboard = [
+            [InlineKeyboardButton("✅ I've Joined All", callback_data="joined_channels")],
             [InlineKeyboardButton("🔙 Back to Main", callback_data="main_menu")]
         ]
         reply_markup = InlineKeyboardMarkup(keyboard)
         
-        if successful > 0:
-            result_text += f"🎯 **Found {successful} working hosts!**\n"
-            try:
-                with open(scanner.success_log_file, 'rb') as result_file:
-                    await update.message.reply_document(
-                        document=result_file,
-                        filename=f"results_{user_id}.txt",
-                        caption=result_text,
-                        reply_markup=reply_markup
-                    )
-            except Exception as e:
-                logger.error(f"Error sending document: {e}")
-                result_text += "\n❌ Could not send results file."
-                await update.message.reply_text(result_text, reply_markup=reply_markup)
+        if update.callback_query:
+            await update.callback_query.edit_message_text(channels_text, reply_markup=reply_markup)
         else:
-            await update.message.reply_text(result_text, reply_markup=reply_markup)
+            await update.message.reply_text(channels_text, reply_markup=reply_markup)
+
+    async def show_scanner_menu(update: Update, context: CallbackContext) -> None:
+        user_id = update.effective_user.id
         
-        # Cleanup files
-        for file_to_remove in [file_path, scanner.success_log_file]:
-            try:
-                if os.path.exists(file_to_remove):
-                    os.remove(file_to_remove)
-            except Exception as e:
-                logger.error(f"Error removing file {file_to_remove}: {e}")
-            
-    except Exception as e:
-        logger.error(f"Scan error: {e}")
-        keyboard = [[InlineKeyboardButton("🔙 Back to Main", callback_data="main_menu")]]
+        can_request, status_msg, remaining = UserManager.can_make_request(user_id)
+        
+        menu_text = (
+            f"🔍 **Network Scanner**\n\n"
+            f"📊 **Your Status:** {status_msg}\n\n"
+            "**Available Protocols:**\n"
+            "• 🛡️ TLS Scan (WebSocket over TLS)\n"
+            "• 🌐 HTTP Scan (Standard HTTP)\n"
+            "• ⚡ VLESS Scan (VLESS over TLS)\n\n"
+            "**Instructions:**\n"
+            "1. Choose a protocol below\n"
+            "2. Upload your hosts.txt file\n"
+            "3. Wait for scan results\n\n"
+            f"Remaining scans today: **{remaining}**"
+        )
+        
+        keyboard = [
+            [InlineKeyboardButton("🛡️ TLS Scan", callback_data="scan_tls"),
+             InlineKeyboardButton("🌐 HTTP Scan", callback_data="scan_http")],
+            [InlineKeyboardButton("⚡ VLESS Scan", callback_data="scan_vless")],
+            [InlineKeyboardButton("🔙 Back to Main", callback_data="main_menu")]
+        ]
         reply_markup = InlineKeyboardMarkup(keyboard)
-        await update.message.reply_text(f"❌ **Scan Failed**\nError: {str(e)}", reply_markup=reply_markup)
-
-async def button_handler(update: Update, context: CallbackContext) -> None:
-    query = update.callback_query
-    await query.answer()
-    
-    user_id = update.effective_user.id
-    
-    if query.data == "main_menu":
-        await start_from_query(update, context)
-    elif query.data == "help":
-        await help_command(update, context)
-    elif query.data == "channels":
-        await show_channels(update, context)
-    elif query.data == "scanner":
-        await show_scanner_menu(update, context)
-    elif query.data == "joined_channels":
-        UserManager.set_joined_channels(user_id)
         
-        await query.edit_message_text(
-            "✅ **Premium Activated!**\n\n"
-            f"You now have {MAX_REQUESTS_PREMIUM} scans per day!\n\n"
-            "Thank you for joining our channels!",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Main", callback_data="main_menu")]])
+        if update.callback_query:
+            await update.callback_query.edit_message_text(menu_text, reply_markup=reply_markup)
+        else:
+            await update.message.reply_text(menu_text, reply_markup=reply_markup)
+
+    async def handle_file_upload(update: Update, context: CallbackContext) -> None:
+        try:
+            user = update.effective_user
+            user_id = user.id
+            
+            can_request, status_msg, remaining = UserManager.can_make_request(user_id)
+            if not can_request:
+                await update.message.reply_text(status_msg)
+                return
+            
+            document = update.message.document
+            
+            if not document.file_name or not document.file_name.endswith('.txt'):
+                await update.message.reply_text("❌ Please upload a valid .txt file")
+                return
+            
+            file = await context.bot.get_file(document.file_id)
+            file_path = f"user_{user_id}_{int(time.time())}.txt"
+            await file.download_to_drive(file_path)
+            
+            user_session = UserManager.get_user_session(user_id)
+            if not user_session or user_session.get('scan_type') is None:
+                keyboard = [
+                    [InlineKeyboardButton("🛡️ TLS Scan", callback_data="scan_tls"),
+                     InlineKeyboardButton("🌐 HTTP Scan", callback_data="scan_http")],
+                    [InlineKeyboardButton("⚡ VLESS Scan", callback_data="scan_vless")],
+                    [InlineKeyboardButton("🔙 Back to Main", callback_data="main_menu")]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                await update.message.reply_text("📥 **File received!**\nChoose scan protocol:", reply_markup=reply_markup)
+                return
+            
+            UserManager.increment_request_count(user_id)
+            scan_type = user_session['scan_type']
+            await start_scan_process(update, context, file_path, scan_type, user_id)
+            
+        except Exception as e:
+            logger.error(f"Error handling file upload: {e}")
+            await update.message.reply_text("❌ Error processing your file.")
+
+    async def start_scan_process(update: Update, context: CallbackContext, file_path: str, scan_type: str, user_id: int):
+        try:
+            protocol_names = {'tls': 'TLS', 'http': 'HTTP', 'vless': 'VLESS'}
+            
+            status_msg = await update.message.reply_text(f"🔍 **Starting {protocol_names[scan_type]} Scan**\nLoading hosts... ⏳")
+            
+            scanner = NetworkScanner(scan_type, file_path)
+            hosts = scanner.load_hosts()
+            
+            if not hosts:
+                await status_msg.edit_text("❌ **No valid hosts found!**")
+                if os.path.exists(file_path):
+                    os.remove(file_path)
+                return
+            
+            await status_msg.edit_text(f"🔍 **Scanning {len(hosts)} hosts**\nProtocol: {protocol_names[scan_type]}\n🔄 Running...")
+            
+            # Run scan in thread to avoid blocking
+            loop = asyncio.get_event_loop()
+            results, successful, total, duration, server_stats = await loop.run_in_executor(
+                None, scanner.run_scan, hosts
+            )
+            
+            # Log scan to database
+            UserManager.log_scan(user_id, scan_type, total, successful, duration)
+            
+            can_request, status_msg, remaining = UserManager.can_make_request(user_id)
+            
+            result_text = (
+                f"✅ **Scan Complete!**\n\n"
+                f"**Protocol:** {protocol_names[scan_type]}\n"
+                f"**Total:** {total} hosts\n"
+                f"**✅ Working:** {successful}\n"
+                f"**❌ Failed:** {total - successful}\n"
+                f"**⏱️ Time:** {duration:.2f}s\n\n"
+            )
+            
+            if server_stats:
+                result_text += "**🏗️ Server Types:**\n"
+                for server_type, count in sorted(server_stats.items(), key=lambda x: x[1], reverse=True):
+                    result_text += f"• {count} {server_type.upper()}\n"
+                result_text += "\n"
+            
+            result_text += f"📊 **Remaining scans:** {remaining}\n\n"
+            
+            keyboard = [
+                [InlineKeyboardButton("🔄 Scan Again", callback_data="scanner")],
+                [InlineKeyboardButton("🔙 Back to Main", callback_data="main_menu")]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            if successful > 0:
+                result_text += f"🎯 **Found {successful} working hosts!**\n"
+                try:
+                    with open(scanner.success_log_file, 'rb') as result_file:
+                        await update.message.reply_document(
+                            document=result_file,
+                            filename=f"results_{user_id}.txt",
+                            caption=result_text,
+                            reply_markup=reply_markup
+                        )
+                except Exception as e:
+                    logger.error(f"Error sending document: {e}")
+                    result_text += "\n❌ Could not send results file."
+                    await update.message.reply_text(result_text, reply_markup=reply_markup)
+            else:
+                await update.message.reply_text(result_text, reply_markup=reply_markup)
+            
+            # Cleanup files
+            for file_to_remove in [file_path, scanner.success_log_file]:
+                try:
+                    if os.path.exists(file_to_remove):
+                        os.remove(file_to_remove)
+                except Exception as e:
+                    logger.error(f"Error removing file {file_to_remove}: {e}")
+                
+        except Exception as e:
+            logger.error(f"Scan error: {e}")
+            keyboard = [[InlineKeyboardButton("🔙 Back to Main", callback_data="main_menu")]]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await update.message.reply_text(f"❌ **Scan Failed**\nError: {str(e)}", reply_markup=reply_markup)
+
+    async def button_handler(update: Update, context: CallbackContext) -> None:
+        query = update.callback_query
+        await query.answer()
+        
+        user_id = update.effective_user.id
+        
+        if query.data == "main_menu":
+            await start_from_query(update, context)
+        elif query.data == "help":
+            await help_command(update, context)
+        elif query.data == "channels":
+            await show_channels(update, context)
+        elif query.data == "scanner":
+            await show_scanner_menu(update, context)
+        elif query.data == "joined_channels":
+            UserManager.set_joined_channels(user_id)
+            
+            await query.edit_message_text(
+                "✅ **Premium Activated!**\n\n"
+                f"You now have {MAX_REQUESTS_PREMIUM} scans per day!\n\n"
+                "Thank you for joining our channels!",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Main", callback_data="main_menu")]])
+            )
+        elif query.data.startswith('scan_'):
+            scan_type = query.data.replace('scan_', '')
+            UserManager.set_user_session(user_id, scan_type)
+            
+            protocol_names = {'tls': 'TLS', 'http': 'HTTP', 'vless': 'VLESS'}
+            
+            await query.edit_message_text(
+                f"🎯 **{protocol_names[scan_type]} Scan Selected**\n\n"
+                "Please upload your hosts.txt file to start scanning!\n\n"
+                "**File format:**\n"
+                "• One host per line\n"
+                "• IP addresses or domains\n"
+                "• Example: 192.168.1.1 or example.com",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Scanner", callback_data="scanner")]])
+            )
+
+    async def start_from_query(update: Update, context: CallbackContext) -> None:
+        query = update.callback_query
+        user = query.from_user
+        user_id = user.id
+        
+        can_access, error_msg = UserManager.can_user_access(user_id)
+        if not can_access:
+            await query.edit_message_text(error_msg)
+            return
+        
+        UserManager.set_user_session(user_id)
+        
+        can_request, status_msg, remaining = UserManager.can_make_request(user_id)
+        
+        keyboard = [
+            [InlineKeyboardButton("🔍 Network Scanner", callback_data="scanner")],
+            [InlineKeyboardButton("📢 Our Channels", callback_data="channels")],
+            [InlineKeyboardButton("🆘 Help", callback_data="help")]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        welcome_text = (
+            f"👋 Welcome {user.first_name}!\n\n"
+            f"🤖 **Advanced Network Scanner Bot**\n\n"
+            f"📊 **Your Status:** {status_msg}\n\n"
+            "🔹 **Multi-Protocol Scanning**\n"
+            "🔹 **Server Type Detection**\n"
+            "🔹 **Real-time Results**\n\n"
+            f"**Free:** {MAX_REQUESTS_FREE} scans/day\n"
+            f"**Premium:** {MAX_REQUESTS_PREMIUM} scans/day\n\n"
+            "Upload hosts.txt file to start scanning!"
         )
-    elif query.data.startswith('scan_'):
-        scan_type = query.data.replace('scan_', '')
-        UserManager.set_user_session(user_id, scan_type)
         
-        protocol_names = {'tls': 'TLS', 'http': 'HTTP', 'vless': 'VLESS'}
-        
-        await query.edit_message_text(
-            f"🎯 **{protocol_names[scan_type]} Scan Selected**\n\n"
-            "Please upload your hosts.txt file to start scanning!\n\n"
-            "**File format:**\n"
-            "• One host per line\n"
-            "• IP addresses or domains\n"
-            "• Example: 192.168.1.1 or example.com",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("🔙 Back to Scanner", callback_data="scanner")]])
-        )
+        await query.edit_message_text(welcome_text, reply_markup=reply_markup)
 
-async def start_from_query(update: Update, context: CallbackContext) -> None:
-    query = update.callback_query
-    user = query.from_user
-    user_id = user.id
-    
-    can_access, error_msg = UserManager.can_user_access(user_id)
-    if not can_access:
-        await query.edit_message_text(error_msg)
-        return
-    
-    UserManager.set_user_session(user_id)
-    
-    can_request, status_msg, remaining = UserManager.can_make_request(user_id)
-    
-    keyboard = [
-        [InlineKeyboardButton("🔍 Network Scanner", callback_data="scanner")],
-        [InlineKeyboardButton("📢 Our Channels", callback_data="channels")],
-        [InlineKeyboardButton("🆘 Help", callback_data="help")]
-    ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    
-    welcome_text = (
-        f"👋 Welcome {user.first_name}!\n\n"
-        f"🤖 **Advanced Network Scanner Bot**\n\n"
-        f"📊 **Your Status:** {status_msg}\n\n"
-        "🔹 **Multi-Protocol Scanning**\n"
-        "🔹 **Server Type Detection**\n"
-        "🔹 **Real-time Results**\n\n"
-        f"**Free:** {MAX_REQUESTS_FREE} scans/day\n"
-        f"**Premium:** {MAX_REQUESTS_PREMIUM} scans/day\n\n"
-        "Upload hosts.txt file to start scanning!"
-    )
-    
-    await query.edit_message_text(welcome_text, reply_markup=reply_markup)
+    async def error_handler(update: Update, context: CallbackContext) -> None:
+        logger.error(f"Bot error: {context.error}")
 
-async def error_handler(update: Update, context: CallbackContext) -> None:
-    logger.error(f"Bot error: {context.error}")
-
-def run_bot():
-    """Run the Telegram bot"""
-    try:
-        # Use a simpler application builder approach
-        application = Application.builder().token(BOT_TOKEN).build()
-        
-        # Add handlers
-        application.add_handler(CommandHandler("start", start))
-        application.add_handler(CommandHandler("help", help_command))
-        application.add_handler(MessageHandler(filters.Document.ALL, handle_file_upload))
-        application.add_handler(CallbackQueryHandler(button_handler))
-        application.add_error_handler(error_handler)
-        
-        logger.info("🤖 Bot starting...")
-        application.run_polling(drop_pending_updates=True)
-    except Exception as e:
-        logger.error(f"Bot failed to start: {e}")
-        raise
+    def run_bot():
+        """Run the Telegram bot"""
+        try:
+            application = Application.builder().token(BOT_TOKEN).build()
+            
+            # Add handlers
+            application.add_handler(CommandHandler("start", start))
+            application.add_handler(CommandHandler("help", help_command))
+            application.add_handler(MessageHandler(filters.Document.ALL, handle_file_upload))
+            application.add_handler(CallbackQueryHandler(button_handler))
+            application.add_error_handler(error_handler)
+            
+            logger.info("🤖 Bot starting...")
+            application.run_polling(drop_pending_updates=True)
+        except Exception as e:
+            logger.error(f"Bot failed to start: {e}")
+            raise
 
 def main():
     """Main function - choose between bot and web based on environment"""
     print("🚀 Starting Network Scanner Bot...")
     
-    # For Render.com, we need to run both in the same process
-    # Start bot in a separate thread
-    import threading
-    bot_thread = threading.Thread(target=run_bot, daemon=True)
-    bot_thread.start()
+    if TELEGRAM_AVAILABLE:
+        # Start bot in a separate thread
+        import threading
+        bot_thread = threading.Thread(target=run_bot, daemon=True)
+        bot_thread.start()
+        print("🤖 Telegram bot started in background thread")
+    else:
+        print("⚠️ Telegram library not available - running in web-only mode")
     
     # Start Flask app in main thread
     port = int(os.environ.get('PORT', 10000))
