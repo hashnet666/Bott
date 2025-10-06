@@ -13,6 +13,7 @@ from telegram.ext import (
     CallbackContext, CallbackQueryHandler
 )
 from flask import Flask, jsonify
+import asyncio
 import threading
 
 # Configure logging
@@ -352,34 +353,50 @@ async def error_handler(update: Update, context: CallbackContext) -> None:
     logging.error(f"Exception while handling an update: {context.error}")
 
 def run_bot():
+    """Run the bot in its own event loop"""
     global bot_running, application
+    
+    # Create a new event loop for this thread
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     
     try:
         application = Application.builder().token(BOT_TOKEN).build()
-        dp = application
 
-        dp.add_handler(CommandHandler("start", start))
-        dp.add_handler(CommandHandler("help", help_command))
-        dp.add_handler(CallbackQueryHandler(button_handler))
-        dp.add_error_handler(error_handler)
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CommandHandler("help", help_command))
+        application.add_handler(CallbackQueryHandler(button_handler))
+        application.add_error_handler(error_handler)
 
         print("🤖 Bot is starting...")
         bot_running = True
         
-        application.run_polling(drop_pending_updates=True)
+        # Run the bot using the event loop
+        loop.run_until_complete(application.initialize())
+        loop.run_until_complete(application.start())
         print("✅ Bot is now running!")
+        
+        # Keep the bot running
+        loop.run_until_complete(application.updater.start_polling())
+        loop.run_forever()
         
     except Exception as e:
         logging.error(f"Bot error: {e}")
         bot_running = False
     finally:
         bot_running = False
+        if application:
+            loop.run_until_complete(application.stop())
+        loop.close()
 
 def main():
     print("🚀 Starting Telegram Bot...")
+    
+    # Start bot in a separate thread
     bot_thread = threading.Thread(target=run_bot, daemon=True)
     bot_thread.start()
     
+    # Start Flask app in main thread
     port = int(os.environ.get('PORT', 10000))
     print(f"🌐 Starting web server on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
